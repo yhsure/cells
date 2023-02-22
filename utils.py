@@ -36,3 +36,34 @@ def load_model(path, model_type, model_params, dev):
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     loss_hist = checkpoint['loss_hist']
     return model, optimizer, loss_hist
+
+
+
+def create_dataloader(dataset, batch_size=4096, shuffle=True):
+    '''
+    Load the data from the specified file and return a DataLoader object.  
+    Datasets: hcl, celegan, uc_epi, zfish_ep50_5226  
+    '''
+    from torch.utils.data import Dataset, DataLoader
+    from scipy.io import mmread
+
+    class RNA(Dataset):
+        def __init__(self, data_file):
+            # load the scRNA-seq data from the specified file
+            self.data = torch.from_numpy(
+                mmread(data_file).astype("float32").transpose().todense())
+            print(self.data.shape)
+
+        def __len__(self):
+            # return the number of examples in the dataset
+            return len(self.data)
+
+        def __getitem__(self, index):
+            # return the preprocessed data for the specified example
+            library = self.data[index].sum(dim=-1)
+            example = self.data[index]
+            return example, library
+    
+    dataset = RNA(f"data/{dataset}.mtx")
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle) 
+    return loader
