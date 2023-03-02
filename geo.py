@@ -52,8 +52,8 @@ def compute_length_of_curve(curve, f, get_Riemannian_metric):
     return out    
 
 # from https://github.com/Gabe-YHLee/GM4HDDA
-def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric, 
-                        num_discretization=100, dev=f"cuda:{0}", maxiter=1000):
+def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric, num_discretization=100, 
+method="powell", options={"maxiter":1000, "disp":True}, loss_scale=10000, tol=1e-8, verb=False, dev=f"cuda:{0}"):
     '''
     z1 : torch.tensor whose size = (1, 2)
     z1 : torch.tensor whose size = (1, 2)
@@ -62,7 +62,8 @@ def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric,
     '''
     from scipy.optimize import minimize
     class GeodesicFittingTool():
-        def __init__(self, z1, z2, z_init, pretrained_model, get_Riemannian_metric, num_discretization, method, maxiter=maxiter, device=dev):
+        def __init__(self, z1, z2, z_init, pretrained_model, get_Riemannian_metric,
+         num_discretization, method=method, options=options, tol=tol, device=dev):
             self.z1 = z1
             self.z2 = z2
             self.pretrained_model = pretrained_model
@@ -71,7 +72,8 @@ def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric,
             self.delta_t = 1/(num_discretization-1)
             self.device = device
             self.method = method
-            self.maxiter = maxiter
+            self.options = options
+            self.tol = tol
             self.z_init_input = z_init
             self.initialize()
             
@@ -88,7 +90,7 @@ def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric,
             z_extended = torch.cat([self.z_init.unsqueeze(0), z_torch, self.z_final.unsqueeze(0)], dim=0)
             G_ = self.get_Riemannian_metric(self.pretrained_model, z_extended[:-1])
             delta_z = (z_extended[1:, :]-z_extended[:-1, :])/(self.delta_t)
-            loss = torch.einsum('ni, nij, nj -> ', delta_z, G_, delta_z) * self.delta_t /10000
+            loss = torch.einsum('ni, nij, nj -> ', delta_z, G_, delta_z) * self.delta_t /loss_scale
             return loss.item()
         
         def jac(self, z):
@@ -106,7 +108,7 @@ def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric,
             self.Nfeval += 1
             return print('{} th loss : {}'.format(self.Nfeval, self.geodesic_loss(z)))
             
-        def BFGS_optimizer(self, callback=False, maxiter=maxiter):
+        def BFGS_optimizer(self, callback=False, options=options, tol=tol):
             self.Nfeval = 0
             z0 = self.init_z_vec
             if callback == True:
@@ -117,16 +119,10 @@ def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric,
                 self.geodesic_loss, 
                 z0, 
                 callback=call, 
-                method="powell",
+                method=self.method,
                 jac = self.jac,
-                tol=1e-18,
-                options = {
-                    # 'eps': 1.4901161193847656e-08, 
-                    'maxiter': 1000, 
-                    'disp': True, 
-                    # 'return_all': False, 
-                    # 'finite_diff_rel_step': None,
-                    }
+                tol=self.tol,
+                options = options
                 )
             self.res = res
 
@@ -134,9 +130,9 @@ def compute_geodesic(z1, z2, pretrained_model, get_Riemannian_metric,
     lin_curve = compute_linear(z1, z2, num_discretization, dev)
 
     tool = GeodesicFittingTool(z1, z2, lin_curve[1:-1], pretrained_model, get_Riemannian_metric, 
-        num_discretization, 'BFGS', maxiter=maxiter, device=dev)
+        num_discretization, method=method, options=options, tol=tol, device=dev)
     tool.BFGS_optimizer()
-    print(tool.res)
+    if verb: print(tool.res)
     z_torch = torch.tensor(tool.res['x'].reshape(tool.z_shape), dtype=torch.float32).to(dev)
     out = torch.cat([tool.z_init.unsqueeze(0), z_torch, tool.z_final.unsqueeze(0)], dim=0)
     return out
