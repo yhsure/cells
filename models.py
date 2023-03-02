@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 import geo
 
 # ---------------------------
@@ -157,3 +158,67 @@ class GMVAE(nn.Module):
 
 
 
+# ---------------------------
+# - Deep Generative Decoder -
+# ---------------------------
+class DGD(nn.Module):
+
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(DGD, self).__init__()
+        # Use a decoder network and a prior distribution as components
+        self.decoder = Decoder(input_dim, hidden_dim, output_dim)
+        self.prior = Prior(input_dim)
+        self.input_dim = input_dim
+
+
+    def forward(self, x):
+        # Compute the MAP estimate of representation for a given feature vector using gradient ascent
+        z = torch.randn(len(x), self.input_dim) # initialize representation randomly
+        z.requires_grad_(True)           # enable gradient computation for representation
+        opt_z = optim.Adam([z], lr=0.01) # optimizer for representation
+        opt_gmm = optim.Adam(self.decoder.parameters(), lr=0.01) # optimizer for decoder 
+
+        for _ in range(10): # Perform 10 steps of gradient ascent
+            opt_z.zero_grad() # Zero out gradients
+            opt_gmm.zero_grad() 
+
+            # Compute the log joint probability of feature vector and representation using decoder and prior
+            log_p_x_z = -F.mse_loss(x, self.decoder(z), reduction='sum') # Use mean squared error loss for feature reconstruction 
+            log_p_z = torch.sum(self.prior.log_prob(z)) # Use prior log probability for representation regularization
+            
+            log_p_x_z_p_z = log_p_x_z + log_p_z
+
+            (-log_p_x_z_p_z).backward() # Compute gradients with respect to negative log joint probability 
+            opt_z.step() # Update representation using gradient ascent
+            opt_gmm.step() # Update decoder using gradient ascent
+
+        return z
+
+# Define the neural network mapping representations to feature distributions
+class Decoder(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super(Decoder, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+# Define the prior distribution over representations
+class Prior(nn.Module):
+    def __init__(self, input_dim):
+        super(Prior, self).__init__()
+        # Use a Gaussian distribution with learnable mean and variance
+        self.mean = nn.Parameter(torch.zeros(input_dim))
+        self.log_var = nn.Parameter(torch.zeros(input_dim))
+
+    def sample(self):
+        # Sample from the Gaussian distribution using reparameterization trick
+        eps = torch.randn_like(self.mean)
+        return self.mean + eps * torch.exp(0.5 * self.log_var)
+
+    def log_prob(self, x):
+        # Compute the log probability of a given representation under the Gaussian distribution
+        return -0.5 * (torch.log(torch.tensor(2 * torch.pi)) + self.log_var + ((x - self.mean) ** 2) / torch.exp(self.log_var))
