@@ -162,39 +162,20 @@ class GMVAE(nn.Module):
 # ---------------------------
 # - Deep Generative Decoder -
 # ---------------------------
-class DGD(nn.Module):
+# TODO: refactor prior+decoder into DGD  
 
+# Define the neural network mapping representations to feature distributions
+class Decoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
-        super(DGD, self).__init__()
-        # Use a decoder network and a prior distribution as components
-        self.decoder = Decoder(input_dim, hidden_dim, output_dim)
-        self.prior = Prior(input_dim)
-        self.input_dim = input_dim
-
+        super(Decoder, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
-        # Compute the MAP estimate of representation for a given feature vector using gradient ascent
-        z = torch.randn(len(x), self.input_dim) # initialize representation randomly
-        z.requires_grad_(True)           # enable gradient computation for representation
-        opt_z = optim.Adam([z], lr=0.01) # optimizer for representation
-        opt_gmm = optim.Adam(self.decoder.parameters(), lr=0.01) # optimizer for decoder 
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
-        for _ in range(10): # Perform 10 steps of gradient ascent
-            opt_z.zero_grad() # Zero out gradients
-            opt_gmm.zero_grad() 
-
-            # Compute the log joint probability of feature vector and representation using decoder and prior
-            log_p_x_z = -F.mse_loss(x, self.decoder(z), reduction='sum') # Use mean squared error loss for feature reconstruction 
-            log_p_z = torch.sum(self.prior.log_prob(z)) # Use prior log probability for representation regularization
-            
-            log_p_x_z_p_z = log_p_x_z + log_p_z
-
-            (-log_p_x_z_p_z).backward() # Compute gradients with respect to negative log joint probability 
-            opt_z.step() # Update representation using gradient ascent
-            opt_gmm.step() # Update decoder using gradient ascent
-
-        return z
-    
 # Define the prior distribution over representations as a Gaussian mixture model
 class Prior(nn.Module):
     def __init__(self, input_dim, num_components):
@@ -207,6 +188,7 @@ class Prior(nn.Module):
 
     def sample(self, batch_size):
         # Sample from the Gaussian mixture model using Gumbel softmax trick
+        # TODO: also try Dirichlet prior instead
         eps = torch.randn(batch_size, self.num_components, self.mean.size(1)).to(self.mean.device)
         z = (eps * torch.exp(0.5 * self.log_var) + self.mean).unsqueeze(1)
         mix = self.mix.unsqueeze(0).repeat(batch_size, 1).unsqueeze(-1)
@@ -229,3 +211,58 @@ class Prior(nn.Module):
         log_prob = gaussian.log_prob(x.unsqueeze(1)) + torch.log(self.mix.unsqueeze(0))
         log_prob = torch.logsumexp(log_prob, dim=2)
         return log_prob
+
+# Define the actual model
+class DGD(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_components=10, posterior_type="gaussian"):
+        super(DGD, self).__init__()
+        # Use a decoder network and a prior distribution as components
+        self.decoder = Decoder(input_dim, hidden_dim, output_dim)
+        self.prior = Prior(input_dim, num_components=num_components)
+        self.input_dim = input_dim
+        
+        # choose posterior for the reconstructions
+        if posterior_type == "gaussian":
+            self.posterior = self._gaussian_posterior
+        elif posterior_type == "negative_binomial":
+            self.posterior = self._negative_binomial_posterior
+
+    def _gaussian_posterior(self, z, x_recon): 
+        # Compute the approximate Gaussian posterior log probability of the representations
+        log_q_z_x = -0.5 * ((z - x_recon)**2).sum(dim=1) - 0.5 * torch.log(torch.tensor(2 * torch.pi)) * self.input_dim
+        return log_q_z_x
+
+    def _negative_binomial_posterior(self, z, x_recon):
+        # Compute the approximate negative binomial posterior log probability of the representations
+        k = torch.tensor([1.0]).to(z.device) # dispersion parameter
+        p = torch.sigmoid(x_recon) # probability parameter
+        log_q_z_x = torch.lgamma(k+z) - torch.lgamma(k) - torch.lgamma(z+1) + k*torch.log(1-p) + z*torch.log(p)
+        return log_q_z_x
+
+
+    def forward(self, x, n_representation_samples=1, opt_steps=1, lr=0.05):
+        # Given a batch of data compute the representations, the reconstructions, and the ELBO
+        z = self.prior.sample(n_representation_samples * x.size(0)) # sample representations from the prior
+        z.requires_grad = True # make sure the representations are differentiable
+        optim = torch.optim.Adam([z], lr=lr) # define the optimizer
+
+        for _ in range(opt_steps):
+            x_recon = self.decoder(z) # generate feature reconstructions from the decoder
+            log_p_z = self.prior.log_prob(z).sum(dim=1) # compute the prior log probability of the representations
+            log_q_z_x = self.posterior(z, x_recon) # compute the approximate posterior log probability of the representations
+            log_likelihood = -F.binary_cross_entropy(x_recon, x, reduction='sum') # compute the negative log likelihood of the data given the reconstructions
+            elbo = (log_likelihood + log_p_z - log_q_z_x).mean() 
+            elbo.backward()
+            optim.step() # take a step in the latent space
+            optim.zero_grad() 
+
+         # reshape to (n_representation_samples, batch_size, _)
+        z = z.view(n_representation_samples, x.size(0), z.size(1))
+        x_recon = x_recon.view(n_representation_samples, x.size(0), x_recon.size(1))
+
+        # take the representation and reconstruction achieving the highest ELBO
+        elbo, idx = torch.max(elbo.view(n_representation_samples, x.size(0)), dim=0)
+        z, x_recon = z[:, idx, :], x_recon[:, idx, :]
+
+        return x_recon, z, elbo
+    
