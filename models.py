@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributions as dist
 import torch.optim as optim
 import geo
 
@@ -193,32 +194,38 @@ class DGD(nn.Module):
             opt_gmm.step() # Update decoder using gradient ascent
 
         return z
-
-# Define the neural network mapping representations to feature distributions
-class Decoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(Decoder, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, output_dim)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
-# Define the prior distribution over representations
+    
+# Define the prior distribution over representations as a Gaussian mixture model
 class Prior(nn.Module):
-    def __init__(self, input_dim):
+    def __init__(self, input_dim, num_components):
         super(Prior, self).__init__()
-        # Use a Gaussian distribution with learnable mean and variance
-        self.mean = nn.Parameter(torch.zeros(input_dim))
-        self.log_var = nn.Parameter(torch.zeros(input_dim))
+        self.num_components = num_components
+        # Use a Gaussian mixture model with learnable means, variances, and mixing proportions
+        self.mean = nn.Parameter(torch.randn(num_components, input_dim))
+        self.log_var = nn.Parameter(torch.randn(num_components, input_dim))
+        self.mix = nn.Parameter(torch.ones(num_components)/num_components)
 
-    def sample(self):
-        # Sample from the Gaussian distribution using reparameterization trick
-        eps = torch.randn_like(self.mean)
-        return self.mean + eps * torch.exp(0.5 * self.log_var)
+    def sample(self, batch_size):
+        # Sample from the Gaussian mixture model using Gumbel softmax trick
+        eps = torch.randn(batch_size, self.num_components, self.mean.size(1)).to(self.mean.device)
+        z = (eps * torch.exp(0.5 * self.log_var) + self.mean).unsqueeze(1)
+        mix = self.mix.unsqueeze(0).repeat(batch_size, 1).unsqueeze(-1)
+        mix = dist.RelaxedOneHotCategorical(torch.tensor([0.1]).to(self.mean.device), logits=mix).rsample()
+        z = torch.sum(z * mix, dim=2)
+        return z
 
     def log_prob(self, x):
-        # Compute the log probability of a given representation under the Gaussian distribution
-        return -0.5 * (torch.log(torch.tensor(2 * torch.pi)) + self.log_var + ((x - self.mean) ** 2) / torch.exp(self.log_var))
+        # Compute the log probability of a given representation under the Gaussian mixture model
+
+        # loop
+        # log_prob = torch.empty(x.shape[0], self.num_components, device=x.device)
+        # for i in range(self.num_components):
+        #     gaussian = dist.Normal(self.mean[i], torch.exp(0.5 * self.log_var[i]))
+        #     log_prob[:, i] = gaussian.log_prob(x) + torch.log(self.mix[i])
+        # log_prob = torch.logsumexp(log_prob, dim=1)
+
+        # no loop
+        gaussian = dist.Normal(self.mean.unsqueeze(0), torch.exp(0.5 * self.log_var).unsqueeze(0))
+        log_prob = gaussian.log_prob(x.unsqueeze(1)) + torch.log(self.mix.unsqueeze(0))
+        log_prob = torch.logsumexp(log_prob, dim=2)
+        return log_prob
